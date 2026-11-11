@@ -314,6 +314,97 @@ function bestMove(st, level = 2) {
 	return best;
 }
 
+// ---------------------------------------------------------------- analisis permainan
+const winPct = (cp) => 50 + 50 * (2 / (1 + Math.exp(-0.00368208 * Math.max(-1000, Math.min(1000, cp)))) - 1);
+const mkey = (m) => m.from + "-" + m.to + (m.promo || "");
+const moveKey = mkey;
+/** "12-28" / "52-60q" -> langkah legal pada posisi st (atau null). */
+function parseMv(st, text) {
+	const m = /^(\d+)-(\d+)([qrbn]?)$/.exec(String(text));
+	if (!m) return null;
+	return legalMoves(st).find((x) => x.from === +m[1] && x.to === +m[2] && (x.promo || "") === (m[3] || (x.promo ? "q" : ""))) || null;
+}
+
+/** Skor semua langkah pada kedalaman tetap (sudut pandang pihak yang jalan). full=true: semua langkah dihitung pasti (untuk "langkah terbaik kedua"). */
+function analyzePly(st, mv, { depth = 3, q = 2, full = false } = {}) {
+	const ctx = { nodes: 0, limit: 4e6, q, deadline: 0, stop: false };
+	const moves = ordered(st, legalMoves(st));
+	let best = null, bestScore = -Infinity, second = -Infinity, played = null, playedScore = null;
+	const pk = mv ? mkey(mv) : null;
+	for (const m of moves) {
+		const isPlayed = pk && mkey(m) === pk;
+		let sc;
+		if (full || isPlayed || !best) sc = -search(apply(st, m), depth - 1, -Infinity, Infinity, ctx);
+		else sc = -search(apply(st, m), depth - 1, -Infinity, -bestScore, ctx);
+		if (isPlayed) { played = m; playedScore = sc; }
+		if (!best || sc > bestScore) { second = bestScore; bestScore = sc; best = m; }
+		else if (full && sc > second) second = sc;
+	}
+	if (playedScore == null) playedScore = bestScore;
+	return { best, bestScore, second: full ? second : null, playedScore };
+}
+
+/** Selisih nilai bidak (sudut pandang pihak yang jalan) setelah langkah mv dan rangkaian tukar-menukar sampai tenang; negatif = korban. */
+function sacCp(st, mv) {
+	const ns = apply(st, mv);
+	const me = st.turn;
+	const after = -qsearch(ns, -Infinity, Infinity, { nodes: 0, limit: 20000 }, 8);
+	const before = evaluate(st) * (me === "w" ? 1 : -1);
+	return after - before;
+}
+
+const CLS = ["brilliant", "great", "best", "excellent", "good", "book", "inaccuracy", "mistake", "miss", "blunder"];
+const accuracyOf = (loss) => Math.max(0, Math.min(100, 103.1668 * Math.exp(-0.04354 * loss) - 3.1669));
+
+/** Analisis seluruh game. mvs = ["12-28", ...]. onPly dipanggil per langkah; opt.yield (async) memberi napas ke event loop. */
+export async function analyzeGame(mvs, opt = {}, onPly) {
+	let st = newGame();
+	const out = [];
+	for (let i = 0; i < mvs.length; i++) {
+		const mv = parseMv(st, mvs[i]);
+		if (!mv) break;
+		const mover = st.turn;
+		const a = analyzePly(st, mv, { depth: opt.depth || 3, q: opt.q ?? 2, full: opt.full !== false });
+		const wBest = winPct(a.bestScore), wPlay = winPct(a.playedScore);
+		const loss = Math.max(0, wBest - wPlay);
+		const isBest = mkey(a.best) === mkey(mv);
+		const prev = out[i - 1];
+		let cls;
+		if (isBest || loss <= 0.3) {
+			cls = "best";
+			if (isBest && opt.full !== false) {
+				const sac = sacCp(st, mv);
+				if (sac <= -200 && wPlay >= 40 && wBest < 92 && "nbrq".includes(st.b[mv.from].toLowerCase())) cls = "brilliant";
+				else if (a.second != null && a.second > -MATE / 2 && wBest - winPct(a.second) >= 14 && wBest < 90 && wBest > 5 && mv.from !== undefined) cls = "great";
+			}
+		} else if (loss <= 2) cls = "excellent";
+		else if (loss <= 5) cls = "good";
+		else if (loss <= 10) cls = "inaccuracy";
+		else if (loss <= 20) cls = "mistake";
+		else cls = "blunder";
+		if ((cls === "inaccuracy" || cls === "mistake") && prev && (prev.cls === "blunder" || prev.cls === "mistake") && wBest >= 60) cls = "miss";
+		if (i < 6 && ["good", "excellent", "best", "inaccuracy"].includes(cls) && loss <= 2 && status(apply(st, mv)) !== "checkmate") cls = "book";
+		const ply = { i, mover, from: mv.from, to: mv.to, cls, loss: Math.round(loss * 10) / 10, best: mkey(a.best), isBest, cpWhite: Math.round((mover === "w" ? 1 : -1) * Math.max(-1000, Math.min(1000, a.playedScore))) };
+		out.push(ply);
+		onPly && onPly(ply);
+		st = apply(st, mv);
+		if (opt.yield) await opt.yield();
+	}
+	return out;
+}
+
+/** Ringkasan per sisi: akurasi rata-rata dan jumlah tiap klasifikasi. */
+function summarize(plies) {
+	const sum = { w: { n: 0, acc: 0, loss: 0, cls: {} }, b: { n: 0, acc: 0, loss: 0, cls: {} } };
+	for (const p of plies) {
+		const s = sum[p.mover];
+		s.n++; s.acc += accuracyOf(p.loss); s.loss += p.loss;
+		s.cls[p.cls] = (s.cls[p.cls] || 0) + 1;
+	}
+	for (const k of ["w", "b"]) { const s = sum[k]; s.accuracy = s.n ? Math.round((s.acc / s.n) * 10) / 10 : 0; s.avgLoss = s.n ? Math.round((s.loss / s.n) * 100) / 100 : 0; delete s.acc; delete s.loss; }
+	return sum;
+}
+
 
 const G={k:'♚',q:'♛',r:'♜',b:'♝',n:'♞',p:'♟︎'};
 let mode='ai',human='w',level=2,hist=[],st,sel=-1,moves=[],last=null,over=false;
