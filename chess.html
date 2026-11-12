@@ -370,15 +370,15 @@ export async function analyzeGame(mvs, opt = {}, onPly) {
 		const isBest = mkey(a.best) === mkey(mv);
 		const prev = out[i - 1];
 		let cls;
-		if (isBest || loss <= 0.3) {
+		if (isBest) {
 			cls = "best";
-			if (isBest && opt.full !== false) {
+			if (opt.full !== false) {
 				const sac = sacCp(st, mv);
 				if (sac <= -200 && wPlay >= 40 && wBest < 92 && "nbrq".includes(st.b[mv.from].toLowerCase())) cls = "brilliant";
 				else if (a.second != null && a.second > -MATE / 2 && wBest - winPct(a.second) >= 14 && wBest < 90 && wBest > 5 && mv.from !== undefined) cls = "great";
 			}
-		} else if (loss <= 2) cls = "excellent";
-		else if (loss <= 5) cls = "good";
+		} else if (loss <= 1.5) cls = "excellent";
+		else if (loss <= 4.5) cls = "good";
 		else if (loss <= 10) cls = "inaccuracy";
 		else if (loss <= 20) cls = "mistake";
 		else cls = "blunder";
